@@ -1,0 +1,127 @@
+name: Analyze, test, and build Flutter app
+
+on:
+  push:
+    tags:
+      - '*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing Git tag to build and publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  APP_DIRECTORY: app
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: Analyze, test, and build Windows release
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+        working-directory: ${{ env.APP_DIRECTORY }}
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Resolve dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze --fatal-infos
+
+      - name: Test
+        run: flutter test
+
+      - name: Build Windows app
+        run: flutter build windows --release
+
+      - name: Package Windows app
+        id: package
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $safeTag = $env:RELEASE_TAG -replace '[^0-9A-Za-z._-]', '-'
+          if ([string]::IsNullOrWhiteSpace($safeTag)) {
+              $safeTag = 'tagged-build'
+          }
+
+          $releaseDirectory = Join-Path $PWD 'build\windows\x64\runner\Release'
+          if (-not (Test-Path -LiteralPath $releaseDirectory -PathType Container)) {
+              throw "Flutter did not create $releaseDirectory."
+          }
+
+          $outputDirectory = Join-Path $PWD 'dist'
+          New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
+          $archiveName = "AV-Network-Toolbag-$safeTag-windows-x64.zip"
+          $archivePath = Join-Path $outputDirectory $archiveName
+          Compress-Archive -Path (Join-Path $releaseDirectory '*') -DestinationPath $archivePath -Force
+
+          $hash = Get-FileHash -LiteralPath $archivePath -Algorithm SHA256
+          $checksumFile = Join-Path $outputDirectory 'SHA256SUMS.txt'
+          '{0}  {1}' -f $hash.Hash.ToLowerInvariant(), $archiveName |
+              Set-Content -LiteralPath $checksumFile -Encoding ascii
+
+          "safe_tag=$safeTag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "archive_path=$archivePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "checksum_path=$checksumFile" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: AV-Network-Toolbag-${{ steps.package.outputs.safe_tag }}-windows-x64
+          path: app/dist
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        shell: powershell
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE_PATH: ${{ steps.package.outputs.archive_path }}
+          CHECKSUM_PATH: ${{ steps.package.outputs.checksum_path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = @($env:ARCHIVE_PATH, $env:CHECKSUM_PATH)
+
+          # A missing release is expected on the first build for a tag. Windows
+          # PowerShell 5.1 otherwise promotes gh's stderr output to a terminating
+          # error because ErrorActionPreference is Stop.
+          $savedErrorActionPreference = $ErrorActionPreference
+          try {
+              $ErrorActionPreference = 'SilentlyContinue'
+              gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+              $releaseExists = $LASTEXITCODE -eq 0
+          }
+          finally {
+              $ErrorActionPreference = $savedErrorActionPreference
+          }
+
+          if ($releaseExists) {
+              gh release upload $env:RELEASE_TAG @assets --clobber --repo $env:GITHUB_REPOSITORY
+          }
+          else {
+              gh release create $env:RELEASE_TAG @assets `
+                  --verify-tag `
+                  --generate-notes `
+                  --title "AV Network Toolbag $env:RELEASE_TAG" `
+                  --repo $env:GITHUB_REPOSITORY
+          }
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Unable to publish the GitHub Release for $env:RELEASE_TAG."
+          }

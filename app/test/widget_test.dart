@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:ui';
+
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:av_network_toolbag/backend_service.dart';
@@ -5,6 +8,30 @@ import 'package:av_network_toolbag/main.dart';
 import 'package:av_network_toolbag/models.dart';
 
 void main() {
+  testWidgets('window exit waits for backend cleanup', (tester) async {
+    final backend = _FakeBackend()..closeGate = Completer<void>();
+    await tester.pumpWidget(AvNetworkToolbagApp(backend: backend));
+    await tester.pumpAndSettle();
+    var finished = false;
+    final exit = tester.binding.handleRequestAppExit().then((value) {
+      finished = true;
+      return value;
+    });
+    await tester.pump();
+    expect(backend.closeCalls, 1);
+    expect(finished, isFalse);
+    backend.closeGate!.complete();
+    expect(await exit, AppExitResponse.exit);
+  });
+
+  testWidgets('cleanup failure cancels exit and allows retry', (tester) async {
+    final backend = _FakeBackend()..closeError = StateError('denied');
+    await tester.pumpWidget(AvNetworkToolbagApp(backend: backend));
+    await tester.pumpAndSettle();
+    expect(await tester.binding.handleRequestAppExit(), AppExitResponse.cancel);
+    backend.closeError = null;
+    expect(await tester.binding.handleRequestAppExit(), AppExitResponse.exit);
+  });
   testWidgets('shows adapter status and configuration controls', (
     tester,
   ) async {
@@ -26,6 +53,9 @@ void main() {
 }
 
 class _FakeBackend implements NetworkBackend {
+  Completer<void>? closeGate;
+  Object? closeError;
+  int closeCalls = 0;
   @override
   Future<Map<String, dynamic>> initialize() async => {
     'admin': true,
@@ -174,5 +204,9 @@ class _FakeBackend implements NetworkBackend {
   Future<void> setTheme(String theme) async {}
 
   @override
-  Future<void> close() async {}
+  Future<void> close() async {
+    closeCalls++;
+    if (closeError != null) throw closeError!;
+    await closeGate?.future;
+  }
 }

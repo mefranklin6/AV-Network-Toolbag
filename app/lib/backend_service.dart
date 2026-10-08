@@ -5,8 +5,12 @@ import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:flutter/services.dart';
+
 import 'dart_dhcp_server.dart';
+import 'dhcp_firewall_lease.dart';
 import 'models.dart';
+import 'scan_range.dart';
 import 'update_service.dart';
 import 'windows_adapter_api.dart';
 import 'windows_network_probe.dart';
@@ -59,8 +63,14 @@ class WindowsNetworkBackend implements NetworkBackend {
   final Map<String, WindowsAdapterInfo> _adapters = {};
   _ScanState? _scan;
   DartDhcpServer? _dhcpServer;
-  String? _dhcpFirewallRule;
+  DhcpFirewallLease? _dhcpFirewallRule;
+  Future<DhcpState>? _dhcpStart;
+  Future<void>? _closeFuture;
   bool _closed = false;
+
+  Directory get _firewallJournalDirectory => Directory(
+    '${_settingsFile.parent.path}${Platform.pathSeparator}firewall-rules',
+  );
 
   File get _settingsFile {
     final localAppData = Platform.environment['LOCALAPPDATA'];
@@ -80,6 +90,10 @@ class WindowsNetworkBackend implements NetworkBackend {
         'AV Network Toolbag currently supports Windows only.',
       );
     }
+    await DhcpFirewallLease.recover(
+      _firewallJournalDirectory,
+      _deleteDhcpFirewallRule,
+    );
     final settings = await _loadSettings();
     return {
       'admin': true,
@@ -431,6 +445,7 @@ class WindowsNetworkBackend implements NetworkBackend {
     final last = prefix <= 30
         ? network + blockSize - 2
         : network + blockSize - 1;
+    validateScanSize(last - first + 1);
     return ScanPlan(
       interfaceAlias: interfaceAlias,
       networkAddress: intToIpv4(network),
@@ -459,6 +474,7 @@ class WindowsNetworkBackend implements NetworkBackend {
     final last = prefix <= 30
         ? network + blockSize - 2
         : network + blockSize - 1;
+    validateScanSize(last - first + 1);
     final scan = _ScanState();
     _scan = scan;
     unawaited(
@@ -538,10 +554,6 @@ class WindowsNetworkBackend implements NetworkBackend {
     const workerCount = 8;
     const timeoutMilliseconds = 500;
     final total = last - first + 1;
-    final groups = List.generate(workerCount, (_) => <String>[]);
-    for (var value = first; value <= last; value++) {
-      groups[(value - first) % workerCount].add(intToIpv4(value));
-    }
 
     final resultPort = ReceivePort();
     final controls = <int, SendPort>{};
@@ -577,20 +589,22 @@ class WindowsNetworkBackend implements NetworkBackend {
           workerError ??= message[2]?.toString() ?? 'Native ICMP scan failed.';
         case 'done':
           completedWorkers++;
-          if (completedWorkers == groups.length && !finished.isCompleted) {
+          if (completedWorkers == workerCount && !finished.isCompleted) {
             finished.complete();
           }
       }
     });
 
     try {
-      for (var index = 0; index < groups.length; index++) {
+      for (var index = 0; index < workerCount; index++) {
         workers.add(
           await Isolate.spawn(windowsIcmpScanWorker, {
             'resultPort': resultPort.sendPort,
             'workerId': index,
             'sourceAddress': sourceAddress,
-            'addresses': groups[index],
+            'first': first + index,
+            'last': last,
+            'stride': workerCount,
             'timeoutMilliseconds': timeoutMilliseconds,
           }),
         );
@@ -806,6 +820,22 @@ class WindowsNetworkBackend implements NetworkBackend {
 
   @override
   Future<DhcpState> startDhcpServer(Map<String, dynamic> parameters) async {
+    _ensureOpen();
+    if (_dhcpStart != null || _closeFuture != null) {
+      throw const BackendException(
+        'DHCP startup or application shutdown is in progress.',
+      );
+    }
+    final operation = _startDhcpServer(parameters);
+    _dhcpStart = operation;
+    try {
+      return await operation;
+    } finally {
+      _dhcpStart = null;
+    }
+  }
+
+  Future<DhcpState> _startDhcpServer(Map<String, dynamic> parameters) async {
     if (_dhcpServer?.isRunning == true) {
       throw const BackendException(
         'The AV Network Toolbag DHCP server is already running.',
@@ -873,28 +903,32 @@ class WindowsNetworkBackend implements NetworkBackend {
 
     final rule =
         'AVNetworkToolbag-Dart-$pid-${DateTime.now().microsecondsSinceEpoch}';
-    await _runWindowsCommand(
-      'netsh.exe',
-      [
-        'advfirewall',
-        'firewall',
-        'add',
-        'rule',
-        'name=$rule',
-        'dir=in',
-        'action=allow',
-        'protocol=UDP',
-        'localport=67',
-        'localip=${configuration.serverAddress}',
-        'profile=any',
-        'enable=yes',
-      ],
-      failurePrefix:
-          'Windows could not create the temporary DHCP firewall rule.',
+    await _removeDhcpFirewallRule();
+    _dhcpFirewallRule = await DhcpFirewallLease.acquire(
+      _firewallJournalDirectory,
+      rule,
     );
-    _dhcpFirewallRule = rule;
-    final server = DartDhcpServer(configuration);
     try {
+      await _runWindowsCommand(
+        'netsh.exe',
+        [
+          'advfirewall',
+          'firewall',
+          'add',
+          'rule',
+          'name=$rule',
+          'dir=in',
+          'action=allow',
+          'protocol=UDP',
+          'localport=67',
+          'localip=${configuration.serverAddress}',
+          'profile=any',
+          'enable=yes',
+        ],
+        failurePrefix:
+            'Windows could not create the temporary DHCP firewall rule.',
+      );
+      final server = DartDhcpServer(configuration);
       await server.start();
       _dhcpServer = server;
     } on Object {
@@ -913,19 +947,16 @@ class WindowsNetworkBackend implements NetworkBackend {
 
   Future<void> _removeDhcpFirewallRule() async {
     final rule = _dhcpFirewallRule;
-    _dhcpFirewallRule = null;
     if (rule == null) return;
-    try {
-      await _runWindowsCommand('netsh.exe', [
-        'advfirewall',
-        'firewall',
-        'delete',
-        'rule',
-        'name=$rule',
-      ], checkExitCode: false);
-    } on Object {
-      // The socket is already stopped; a missing rule should not block close.
-    }
+    await rule.release(_deleteDhcpFirewallRule);
+    _dhcpFirewallRule = null;
+  }
+
+  Future<void> _deleteDhcpFirewallRule(String rule) async {
+    // The native API treats an already-absent rule as success, without relying
+    // on localized netsh output. Other failures preserve the recovery journal.
+    await const MethodChannel('av_network_toolbag/firewall')
+        .invokeMethod<void>('removeRule', rule);
   }
 
   @override
@@ -1200,9 +1231,20 @@ class WindowsNetworkBackend implements NetworkBackend {
   }
 
   @override
-  Future<void> close() async {
+  Future<void> close() =>
+      _closeFuture ??= _closeBackend().catchError((Object error) {
+        _closeFuture = null;
+        throw error;
+      });
+
+  Future<void> _closeBackend() async {
     if (_closed) return;
     _scan?.cancelRequested = true;
+    try {
+      await _dhcpStart;
+    } on Object {
+      // Startup failure still needs to be followed by cleanup.
+    }
     await _dhcpServer?.stop();
     await _removeDhcpFirewallRule();
     _closed = true;

@@ -12,7 +12,11 @@ const _latestReleaseApi =
     'https://api.github.com/repos/mefranklin6/AV-Network-Toolbag/releases/latest';
 const latestReleasePage =
     'https://github.com/mefranklin6/AV-Network-Toolbag/releases/latest';
-const _releaseArchivePattern = r'^AV-Network-Toolbag-.+-windows-x64\.zip$';
+const _releaseArchivePattern =
+    r'^AV-Network-Toolbag-[0-9A-Za-z._-]+-windows-x64\.zip$';
+const _releaseInstallerPattern =
+    r'^AV-Network-Toolbag-[0-9A-Za-z._-]+-windows-x64-Setup\.exe$';
+const installationMarkerName = 'installed.location';
 const _maximumArchiveBytes = 500 * 1024 * 1024;
 const _maximumExpandedBytes = 1024 * 1024 * 1024;
 
@@ -35,6 +39,7 @@ class UpdateRelease {
     required this.archiveName,
     required this.archiveUrl,
     required this.checksumUrl,
+    this.installer = false,
   });
 
   final String version;
@@ -45,6 +50,7 @@ class UpdateRelease {
   final String archiveName;
   final Uri archiveUrl;
   final Uri checksumUrl;
+  final bool installer;
 
   bool isNewerThan(String currentVersion) =>
       _SemanticVersion.parse(version)
@@ -57,21 +63,27 @@ class PreparedUpdate {
     required this.release,
     required this.stagingDirectory,
     required this.payloadDirectory,
+    this.installerFile,
   });
 
   final UpdateRelease release;
   final Directory stagingDirectory;
   final Directory payloadDirectory;
+  final File? installerFile;
 }
 
 class UpdateService {
-  UpdateService() : _client = HttpClient() {
+  UpdateService({Directory? applicationDirectory, HttpClient? client})
+    : applicationDirectory =
+          applicationDirectory ?? File(Platform.resolvedExecutable).parent,
+      _client = client ?? HttpClient() {
     _client.connectionTimeout = const Duration(seconds: 12);
     _client.idleTimeout = const Duration(seconds: 15);
     _client.userAgent = 'AV-Network-Toolbag-Updater';
   }
 
   final HttpClient _client;
+  final Directory applicationDirectory;
 
   Future<UpdateRelease?> checkForUpdate(String currentVersion) async {
     final release = await fetchLatestRelease();
@@ -95,6 +107,16 @@ class UpdateService {
         'GitHub returned an invalid release response.',
       );
     }
+    return parseUpdateRelease(
+      value,
+      installed: await isInstallerManaged(applicationDirectory),
+    );
+  }
+
+  static UpdateRelease parseUpdateRelease(
+    Map<String, dynamic> value, {
+    required bool installed,
+  }) {
     final tag = value['tag_name']?.toString().trim() ?? '';
     final version = _SemanticVersion.normalized(tag);
     final pageUrl = Uri.tryParse(value['html_url']?.toString() ?? '');
@@ -115,7 +137,9 @@ class UpdateService {
           asset['browser_download_url']?.toString() ?? '',
         );
         if (url == null || url.scheme != 'https') continue;
-        if (RegExp(_releaseArchivePattern).hasMatch(name)) {
+        if (RegExp(
+          installed ? _releaseInstallerPattern : _releaseArchivePattern,
+        ).hasMatch(name)) {
           archiveName = name;
           archiveUrl = url;
         } else if (name.toUpperCase() == 'SHA256SUMS.TXT') {
@@ -124,8 +148,9 @@ class UpdateService {
       }
     }
     if (archiveName == null || archiveUrl == null || checksumUrl == null) {
-      throw const UpdateException(
-        'The latest release does not contain both the Windows ZIP and SHA256SUMS.txt.',
+      throw UpdateException(
+        'The latest release does not contain both the Windows '
+        '${installed ? 'installer' : 'ZIP'} and SHA256SUMS.txt.',
       );
     }
     return UpdateRelease(
@@ -139,6 +164,7 @@ class UpdateService {
       archiveName: archiveName,
       archiveUrl: archiveUrl,
       checksumUrl: checksumUrl,
+      installer: installed,
     );
   }
 
@@ -146,10 +172,8 @@ class UpdateService {
     UpdateRelease release, {
     required void Function(double? progress, String activity) onProgress,
   }) async {
-    final stamp = DateTime.now().microsecondsSinceEpoch;
-    final staging = Directory(
-      '${Directory.systemTemp.path}${Platform.pathSeparator}'
-      'AVNetworkToolbag-update-$stamp',
+    final staging = await Directory.systemTemp.createTemp(
+      'AVNetworkToolbag-update-',
     );
     final payload = Directory(
       '${staging.path}${Platform.pathSeparator}payload',
@@ -196,6 +220,15 @@ class UpdateService {
         );
       }
 
+      if (release.installer) {
+        return PreparedUpdate(
+          release: release,
+          stagingDirectory: staging,
+          payloadDirectory: payload,
+          installerFile: archiveFile,
+        );
+      }
+
       onProgress(null, 'Extracting and validating the update…');
       await _extractSafely(archiveFile, payload);
       final executable = File(
@@ -226,9 +259,15 @@ class UpdateService {
   }
 
   Future<void> launchInstaller(PreparedUpdate update) async {
-    final installDirectory = File(Platform.resolvedExecutable).parent;
+    final installDirectory = applicationDirectory;
+    final installed = await isInstallerManaged(installDirectory);
+    if (installed != update.release.installer) {
+      throw const UpdateException(
+        'The installation type changed. Check for updates again.',
+      );
+    }
     final bundledHelper = File(
-      '${update.payloadDirectory.path}${Platform.pathSeparator}'
+      '${installed ? installDirectory.path : update.payloadDirectory.path}${Platform.pathSeparator}'
       'av_network_toolbag_updater.exe',
     );
     final temporaryHelper = File(
@@ -240,10 +279,10 @@ class UpdateService {
       temporaryHelper.path,
       [
         pid.toString(),
-        update.payloadDirectory.path,
+        installed ? update.installerFile!.path : update.payloadDirectory.path,
         update.stagingDirectory.path,
         installDirectory.path,
-        'av_network_toolbag.exe',
+        installed ? '--installer' : 'av_network_toolbag.exe',
       ],
       mode: ProcessStartMode.detached,
       workingDirectory: Directory.systemTemp.path,
@@ -363,6 +402,23 @@ class UpdateService {
       input.closeSync();
     }
   }
+}
+
+/// Inno writes the destination path as UTF-8. A copy moved elsewhere is portable.
+Future<bool> isInstallerManaged(Directory directory) async {
+  final marker = File(
+    '${directory.path}${Platform.pathSeparator}$installationMarkerName',
+  );
+  if (!await marker.exists()) return false;
+  // Do not silently fall back to ZIP updates if an installed marker is unreadable.
+  final recorded = (await marker.readAsString())
+      .replaceFirst('\ufeff', '')
+      .trim();
+  String normalize(String path) => path
+      .replaceAll('/', r'\')
+      .replaceFirst(RegExp(r'\\+$'), '')
+      .toLowerCase();
+  return normalize(recorded) == normalize(directory.absolute.path);
 }
 
 String readExecutableVersion() {

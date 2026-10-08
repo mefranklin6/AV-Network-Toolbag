@@ -64,6 +64,7 @@ class DartDhcpServer {
 
   final DhcpServerConfiguration configuration;
   final Map<String, _LeaseRecord> _leases = {};
+  final Map<String, DateTime> _declinedAddresses = {};
   RawDatagramSocket? _socket;
   StreamSubscription<RawSocketEvent>? _subscription;
   String lastError = '';
@@ -100,7 +101,7 @@ class DartDhcpServer {
         if (event == RawSocketEvent.read) {
           Datagram? datagram;
           while ((datagram = socket.receive()) != null) {
-            _handle(datagram!.data);
+            handlePacket(datagram!.data);
           }
         }
       },
@@ -118,9 +119,10 @@ class DartDhcpServer {
     _socket = null;
   }
 
-  void _handle(Uint8List request) {
+  /// Processes one client datagram. Also usable without a socket for protocol tests.
+  void handlePacket(Uint8List request) {
     try {
-      final packet = _DhcpPacket.tryParse(request);
+      final packet = _DhcpPacket.tryParse(request, operation: 1);
       if (packet == null ||
           packet.hardwareType != 1 ||
           packet.hardwareLength != 6 ||
@@ -156,9 +158,12 @@ class DartDhcpServer {
           break;
         case 4: // DHCPDECLINE
           final lease = _leases[packet.clientKey];
-          if (lease != null) {
+          if (packet.serverIdentifier == configuration.serverAddress &&
+              lease != null &&
+              packet.requestedAddress == lease.address) {
             lease.status = 'Declined';
             lease.expiresAt = DateTime.now().add(const Duration(hours: 1));
+            _declinedAddresses[lease.address] = lease.expiresAt;
           }
           break;
         case 7: // DHCPRELEASE
@@ -180,8 +185,9 @@ class DartDhcpServer {
   String? _selectAddress(_DhcpPacket packet) {
     final existing = _leases[packet.clientKey];
     if (existing != null &&
+        existing.status != 'Declined' &&
         existing.expiresAt.isAfter(DateTime.now()) &&
-        _inPool(existing.address)) {
+        _addressAvailableFor(existing.address, packet.clientKey)) {
       return existing.address;
     }
     if (_addressAvailableFor(packet.requestedAddress, packet.clientKey)) {
@@ -197,6 +203,8 @@ class DartDhcpServer {
   bool _addressAvailableFor(String address, String clientKey) {
     if (!_inPool(address)) return false;
     final now = DateTime.now();
+    _declinedAddresses.removeWhere((_, until) => !until.isAfter(now));
+    if (_declinedAddresses.containsKey(address)) return false;
     return !_leases.entries.any(
       (entry) =>
           entry.key != clientKey &&
@@ -315,9 +323,9 @@ class _DhcpPacket {
     required this.options,
   });
 
-  static _DhcpPacket? tryParse(Uint8List bytes) {
+  static _DhcpPacket? tryParse(Uint8List bytes, {required int operation}) {
     if (bytes.length < 240 ||
-        bytes[0] != 1 ||
+        bytes[0] != operation ||
         bytes[236] != 99 ||
         bytes[237] != 130 ||
         bytes[238] != 83 ||
@@ -421,16 +429,14 @@ Future<String?> discoverDhcpServer(
       if (event != RawSocketEvent.read) return;
       Datagram? datagram;
       while ((datagram = socket!.receive()) != null) {
-        final packet = _DhcpPacket.tryParse(datagram!.data);
-        if (packet == null || packet.transactionId != transactionId) continue;
-        if (packet.messageType == 2 || packet.messageType == 5) {
-          if (!response.isCompleted) {
-            response.complete(
-              packet.serverIdentifier.isEmpty
-                  ? datagram.address.address
-                  : packet.serverIdentifier,
-            );
-          }
+        final server = dhcpDiscoveryResponse(
+          datagram!.data,
+          transactionId: transactionId!,
+          sourceAddress: datagram.address.address,
+          sourcePort: datagram.port,
+        );
+        if (server != null && !response.isCompleted) {
+          response.complete(server);
         }
       }
     });
@@ -447,6 +453,30 @@ Future<String?> discoverDhcpServer(
     if (subscription != null) await subscription.cancel();
     socket?.close();
   }
+}
+
+/// Recognizes only replies to this application's discovery probe.
+String? dhcpDiscoveryResponse(
+  Uint8List bytes, {
+  required int transactionId,
+  required String sourceAddress,
+  required int sourcePort,
+}) {
+  final packet = _DhcpPacket.tryParse(bytes, operation: 2);
+  if (sourcePort != 67 ||
+      packet == null ||
+      packet.transactionId != transactionId ||
+      packet.hardwareType != 1 ||
+      packet.hardwareLength != 6 ||
+      (packet.messageType != 2 && packet.messageType != 5)) {
+    return null;
+  }
+  for (var index = 0; index < _probeMac.length; index++) {
+    if (packet.clientHardwareAddress[index] != _probeMac[index]) return null;
+  }
+  return packet.serverIdentifier.isEmpty
+      ? sourceAddress
+      : packet.serverIdentifier;
 }
 
 Uint8List _buildDhcpDiscover(int transactionId) {

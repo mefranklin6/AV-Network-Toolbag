@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
 
@@ -24,15 +25,47 @@ class _AvNetworkToolbagAppState extends State<AvNetworkToolbagApp> {
   late final NetworkBackend _backend =
       widget.backend ?? WindowsNetworkBackend();
   ThemeMode _themeMode = ThemeMode.dark;
+  late final AppLifecycleListener _lifecycle;
+  final _messengerKey = GlobalKey<ScaffoldMessengerState>();
+
+  @override
+  void initState() {
+    super.initState();
+    _lifecycle = AppLifecycleListener(
+      onExitRequested: () async {
+        try {
+          await _backend.close();
+          return AppExitResponse.exit;
+        } on Object catch (error) {
+          debugPrint('Application cleanup failed: $error');
+          _messengerKey.currentState?.showSnackBar(
+            SnackBar(
+              content: Text(
+                'Could not remove the temporary DHCP firewall rule. '
+                'Close the window again to retry. $error',
+              ),
+            ),
+          );
+          return AppExitResponse.cancel;
+        }
+      },
+    );
+  }
 
   @override
   void dispose() {
-    unawaited(_backend.close());
+    _lifecycle.dispose();
+    unawaited(
+      _backend.close().catchError((Object error) {
+        debugPrint('Application cleanup failed: $error');
+      }),
+    );
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) => MaterialApp(
+    scaffoldMessengerKey: _messengerKey,
     title: 'AV Network Toolbag',
     debugShowCheckedModeBanner: false,
     themeMode: _themeMode,

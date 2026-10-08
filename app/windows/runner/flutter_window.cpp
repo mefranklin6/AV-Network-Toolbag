@@ -1,6 +1,10 @@
 #include "flutter_window.h"
 
 #include <optional>
+#include <netfw.h>
+#include <wrl/client.h>
+#include <flutter/standard_method_codec.h>
+#include <regex>
 
 #include "flutter/generated_plugin_registrant.h"
 
@@ -25,6 +29,46 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  firewall_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(),
+          "av_network_toolbag/firewall",
+          &flutter::StandardMethodCodec::GetInstance());
+  firewall_channel_->SetMethodCallHandler(
+      [](const auto& call, auto result) {
+        if (call.method_name() != "removeRule") {
+          result->NotImplemented();
+          return;
+        }
+        const auto* name = call.arguments()
+            ? std::get_if<std::string>(call.arguments()) : nullptr;
+        if (!name || !std::regex_match(*name,
+                std::regex("AVNetworkToolbag-Dart-[0-9]+-[0-9]+"))) {
+          result->Error("invalid_rule", "Invalid temporary firewall rule name.");
+          return;
+        }
+        Microsoft::WRL::ComPtr<INetFwPolicy2> policy;
+        Microsoft::WRL::ComPtr<INetFwRules> rules;
+        HRESULT status = CoCreateInstance(__uuidof(NetFwPolicy2), nullptr,
+            CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&policy));
+        if (SUCCEEDED(status)) status = policy->get_Rules(&rules);
+        if (SUCCEEDED(status)) {
+          const std::wstring wide_name(name->begin(), name->end());
+          BSTR rule_name = SysAllocString(wide_name.c_str());
+          if (!rule_name) {
+            status = E_OUTOFMEMORY;
+          } else {
+            status = rules->Remove(rule_name);
+            SysFreeString(rule_name);
+          }
+        }
+        if (FAILED(status)) {
+          result->Error("firewall_cleanup", "Windows could not remove the temporary firewall rule (HRESULT " +
+              std::to_string(status) + ").");
+          return;
+        }
+        result->Success();
+      });
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -40,6 +84,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  firewall_channel_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }

@@ -179,9 +179,10 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
                   SelectableText(release.notes),
                 ],
                 const SizedBox(height: 18),
-                const Text(
-                  'The release ZIP will be downloaded from GitHub, verified '
-                  'against SHA256SUMS.txt, and installed after the app closes.',
+                Text(
+                  'The ${release.installer ? 'installer' : 'portable ZIP'} will be downloaded from GitHub '
+                  'and verified against SHA256SUMS.txt. Updating stops DHCP and closes the app. '
+                  '${release.installer ? 'Setup will then guide you through the upgrade.' : 'The app will restart after the update.'}',
                 ),
               ],
             ),
@@ -195,7 +196,11 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
           FilledButton.icon(
             onPressed: () => Navigator.pop(context, true),
             icon: const Icon(Icons.download_for_offline_outlined),
-            label: const Text('Download and restart'),
+            label: Text(
+              release.installer
+                  ? 'Download and update'
+                  : 'Download and restart',
+            ),
           ),
         ],
       ),
@@ -254,8 +259,9 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
     );
     await Future<void>.delayed(Duration.zero);
 
+    PreparedUpdate? prepared;
     try {
-      final prepared = await updateService.prepareUpdate(
+      prepared = await updateService.prepareUpdate(
         release,
         onProgress: (value, message) {
           progress = value;
@@ -269,17 +275,23 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
           }
         },
       );
-      if (!mounted) return;
-      if (dialogOpen && progressContext?.mounted == true) {
-        Navigator.pop(progressContext!);
+      if (!mounted) {
+        await prepared.stagingDirectory.delete(recursive: true);
+        return;
       }
+      // Stop services before handing off. A failed cleanup must not install or exit.
+      await widget.backend.stopDhcpServer();
+      await widget.backend.cancelScan();
       await updateService.launchInstaller(prepared);
-      try {
-        await widget.backend.close();
-      } finally {
-        exit(0);
-      }
+      exit(0);
     } on Object catch (error) {
+      if (prepared != null) {
+        try {
+          await prepared.stagingDirectory.delete(recursive: true);
+        } on Object {
+          // Keep the original download or handoff error.
+        }
+      }
       if (dialogOpen && progressContext?.mounted == true) {
         Navigator.pop(progressContext!);
       }

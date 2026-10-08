@@ -80,10 +80,43 @@ int APIENTRY wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE,
   HANDLE parent_process =
       ::OpenProcess(SYNCHRONIZE, FALSE, parent_process_id);
   if (parent_process != nullptr) {
-    ::WaitForSingleObject(parent_process, 30000);
+    const DWORD wait_result = ::WaitForSingleObject(parent_process, 30000);
     ::CloseHandle(parent_process);
+    if (wait_result != WAIT_OBJECT_0) {
+      ShowFailure(L"The application did not exit. No update was installed. Close it and try again.");
+      return EXIT_FAILURE;
+    }
+  } else if (::GetLastError() != ERROR_INVALID_PARAMETER) {
+    ShowFailure(L"The updater could not verify that the application exited.");
+    return EXIT_FAILURE;
   }
   ::Sleep(300);
+
+  if (executable_name == L"--installer") {
+    // The payload is a verified Inno installer. Never copy files into an
+    // installer-managed installation ourselves.
+    std::wstring command = L"\"" + payload_directory.wstring() +
+        L"\" /SP- /NORESTART /DIR=\"" + install_directory.wstring() + L"\"";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!::CreateProcessW(payload_directory.c_str(), command.data(), nullptr,
+          nullptr, FALSE, 0, nullptr, staging_directory.c_str(), &startup, &process)) {
+      ShowFailure(L"Setup could not be started. The current version was not changed.\n\n" +
+                  payload_directory.wstring());
+      return EXIT_FAILURE;
+    }
+    ::CloseHandle(process.hThread);
+    ::WaitForSingleObject(process.hProcess, INFINITE);
+    DWORD result = EXIT_FAILURE;
+    ::GetExitCodeProcess(process.hProcess, &result);
+    ::CloseHandle(process.hProcess);
+    std::error_code error;
+    fs::remove_all(staging_directory, error);
+    ::MoveFileExW(helper_path.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+    // Setup displays its own errors or cancellation UI and offers to reopen.
+    return static_cast<int>(result);
+  }
 
   const fs::path backup_directory = staging_directory / L"backup";
   std::error_code cleanup_error;
@@ -119,4 +152,3 @@ int APIENTRY wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE,
   ::MoveFileExW(helper_path.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
   return EXIT_SUCCESS;
 }
-

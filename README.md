@@ -25,16 +25,22 @@ Windows Network Tools for the AV Pro, the IoT Technician, and the home-lab.
 
 ## Quickstart
 
-Download the [latest .exe here](https://github.com/mefranklin6/AV-Network-Toolbag/releases/latest)
+Download the installer .exe from the [latest release](https://github.com/mefranklin6/AV-Network-Toolbag/releases/latest).
 
-Windows Smart Screen may issue a warning upon first launch. You can safely ignore this or you can compile the app yourself to bypass the warning.
+Windows SmartScreen may warn on first launch because the executable is unsigned. (You can build this project from source if you want to avoid Windows Smart Screen.)
 
-The app requires elevation to administrator in order to change network settings.
+The app requires elevation to administrator in order to change network settings, which is default Windows behavior.
 
 ## Acknowledgements
 
-This project was inspired by [netChanger](https://github.com/alecdvor/netChanger/).
+This project was inspired by [netChanger](https://github.com/alecdvor/netChanger/)
 
 ## AI Disclosure
 
 The foundation of this tool came from my PowerShell tool [NIC_Changer](https://github.com/mefranklin6/NIC_Changer), and AI did most of the translation of the PowerShell backend to Dart and Flutter. NIC_Changer had a human review every line of code, and this project builds on top of that, but is not so strictly reviewed.
+
+## Changelog
+
+8 October 2026
+
+- First release

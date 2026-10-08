@@ -37,10 +37,11 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: '3.47.6'
           cache: true
 
       - name: Resolve dependencies
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
 
       - name: Analyze
         run: flutter analyze --fatal-infos
@@ -51,34 +52,21 @@ jobs:
       - name: Build Windows app
         run: flutter build windows --release
 
-      - name: Package Windows app
+      - name: Prepare Inno Setup compiler
+        id: inno
+        run: ..\installer\bootstrap-inno.ps1
+
+      - name: Package installer and portable ZIP
         id: package
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $safeTag = $env:RELEASE_TAG -replace '[^0-9A-Za-z._-]', '-'
-          if ([string]::IsNullOrWhiteSpace($safeTag)) {
-              $safeTag = 'tagged-build'
-          }
+        env:
+          ISCC_PATH: ${{ steps.inno.outputs.iscc_path }}
+        run: ..\installer\package.ps1 -Tag $env:RELEASE_TAG -IsccPath $env:ISCC_PATH
 
-          $releaseDirectory = Join-Path $PWD 'build\windows\x64\runner\Release'
-          if (-not (Test-Path -LiteralPath $releaseDirectory -PathType Container)) {
-              throw "Flutter did not create $releaseDirectory."
-          }
+      - name: Test installer lifecycle
+        run: ..\installer\smoke-test.ps1
 
-          $outputDirectory = Join-Path $PWD 'dist'
-          New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
-          $archiveName = "AV-Network-Toolbag-$safeTag-windows-x64.zip"
-          $archivePath = Join-Path $outputDirectory $archiveName
-          Compress-Archive -Path (Join-Path $releaseDirectory '*') -DestinationPath $archivePath -Force
-
-          $hash = Get-FileHash -LiteralPath $archivePath -Algorithm SHA256
-          $checksumFile = Join-Path $outputDirectory 'SHA256SUMS.txt'
-          '{0}  {1}' -f $hash.Hash.ToLowerInvariant(), $archiveName |
-              Set-Content -LiteralPath $checksumFile -Encoding ascii
-
-          "safe_tag=$safeTag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "archive_path=$archivePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "checksum_path=$checksumFile" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Test native updater handoff
+        run: ..\installer\test-update-helper.ps1
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v7
@@ -93,10 +81,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ARCHIVE_PATH: ${{ steps.package.outputs.archive_path }}
+          INSTALLER_PATH: ${{ steps.package.outputs.installer_path }}
           CHECKSUM_PATH: ${{ steps.package.outputs.checksum_path }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $assets = @($env:ARCHIVE_PATH, $env:CHECKSUM_PATH)
+          $assets = @($env:INSTALLER_PATH, $env:ARCHIVE_PATH, $env:CHECKSUM_PATH)
 
           # A missing release is expected on the first build for a tag. Windows
           # PowerShell 5.1 otherwise promotes gh's stderr output to a terminating

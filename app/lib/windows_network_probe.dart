@@ -4,6 +4,8 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
+import 'scan_range.dart';
+
 const _ipSuccess = 0;
 const _icmpPayloadSize = 24;
 const _icmpReplyBufferSize = 256;
@@ -139,7 +141,11 @@ Future<void> windowsIcmpScanWorker(Map<String, Object> arguments) async {
   final resultPort = arguments['resultPort']! as SendPort;
   final workerId = arguments['workerId']! as int;
   final sourceAddress = arguments['sourceAddress']! as String;
-  final addresses = (arguments['addresses']! as List).cast<String>();
+  final addresses = scanWorkerAddresses(
+    arguments['first']! as int,
+    arguments['last']! as int,
+    arguments['stride']! as int,
+  );
   final timeoutMilliseconds = arguments['timeoutMilliseconds']! as int;
   final control = ReceivePort();
   var stopRequested = false;

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.15)
 project(runner LANGUAGES CXX)
 
 # Define the application target. To change its name, change BINARY_NAME in the
@@ -20,6 +20,9 @@ add_executable(${BINARY_NAME} WIN32
 # application copies this helper to a temporary location before launching it so
 # the installed copy can be updated too.
 add_executable(av_network_toolbag_updater WIN32 "update_helper.cpp")
+# This helper runs from a temporary directory, away from the bundled CRT DLLs.
+set_property(TARGET av_network_toolbag_updater PROPERTY
+  MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 target_compile_features(av_network_toolbag_updater PUBLIC cxx_std_17)
 target_compile_options(av_network_toolbag_updater PRIVATE /W4 /WX /EHsc)
 target_compile_definitions(
@@ -44,6 +47,7 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE ole32.lib oleaut32.lib)
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Visual Studio already generates the UAC portion of the application manifest.

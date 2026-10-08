@@ -19,6 +19,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // plugins.
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
+  // Inno checks this mutex before install/uninstall. Keep it until process exit
+  // so Setup never force-closes DHCP or replaces files in a running instance.
+  ::CreateMutexW(nullptr, FALSE, L"Global\\AVNetworkToolbag.Running");
+
   flutter::DartProject project(L"data");
 
   std::vector<std::string> command_line_arguments =

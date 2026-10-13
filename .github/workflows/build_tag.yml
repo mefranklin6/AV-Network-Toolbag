@@ -33,6 +33,14 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
 
+      - name: Get app version from release tag
+        id: version
+        run: |
+          if ($env:RELEASE_TAG -cnotmatch '^v?(\d+\.\d+\.\d+)$') {
+              throw "Release tag '$env:RELEASE_TAG' must be a version such as v1.1.0."
+          }
+          "app_version=$($Matches[1])" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -50,7 +58,9 @@ jobs:
         run: flutter test
 
       - name: Build Windows app
-        run: flutter build windows --release
+        env:
+          APP_VERSION: ${{ steps.version.outputs.app_version }}
+        run: flutter build windows --release --build-name $env:APP_VERSION
 
       - name: Prepare Inno Setup compiler
         id: inno

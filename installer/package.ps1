@@ -5,12 +5,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $app = Join-Path $repo 'app'
-$versionMatch = [regex]::Match((Get-Content -Raw (Join-Path $app 'pubspec.yaml')), '(?m)^version:\s*(\d+\.\d+\.\d+)(?:\+\d+)?\s*$')
-if (-not $versionMatch.Success) { throw 'pubspec.yaml must contain a stable semantic version.' }
-$version = $versionMatch.Groups[1].Value
-if ($Tag -cnotmatch '^v?\d+\.\d+\.\d+$' -or ($Tag -creplace '^v', '') -ne $version) {
-    throw "Release tag '$Tag' must match pubspec.yaml version $version (with optional v prefix)."
+if ($Tag -cnotmatch '^v?(\d+\.\d+\.\d+)$') {
+    throw "Release tag '$Tag' must be a version such as v1.1.0."
 }
+$version = $Matches[1]
 $bundle = Join-Path $app 'build\windows\x64\runner\Release'
 foreach ($required in @('av_network_toolbag.exe', 'av_network_toolbag_updater.exe', 'flutter_windows.dll', 'data\app.so', 'data\icudtl.dat')) {
     if (-not (Test-Path -LiteralPath (Join-Path $bundle $required) -PathType Leaf)) {
@@ -19,7 +17,7 @@ foreach ($required in @('av_network_toolbag.exe', 'av_network_toolbag_updater.ex
 }
 $exeVersion = (Get-Item -LiteralPath (Join-Path $bundle 'av_network_toolbag.exe')).VersionInfo
 if ("$($exeVersion.FileMajorPart).$($exeVersion.FileMinorPart).$($exeVersion.FileBuildPart)" -ne $version) {
-    throw 'The executable version does not match pubspec.yaml. Rebuild before packaging.'
+    throw "The executable version does not match release tag '$Tag'. Rebuild with --build-name $version before packaging."
 }
 if (Test-Path -LiteralPath (Join-Path $bundle 'installed.location')) {
     throw 'The build bundle must not contain an installed-copy marker.'

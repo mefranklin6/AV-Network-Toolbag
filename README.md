@@ -35,11 +35,29 @@ The app requires elevation to administrator in order to change network settings,
 
 This project was inspired by [netChanger](https://github.com/alecdvor/netChanger/)
 
+## Privacy and Security
+
+The app itself does not include any telemetry, tracking, or features that reduce the users privacy. It only uses the internet to check for the latest version.
+
+The app is only intended for authorized users of a network, and is similar to using tools like Wireshark or a Nmap ping scan.
+
+Windows is likely to flag the installer and program as potentially dangerous: Code signing and trust is in-process so this shouldn't happen in the future.
+
 ## AI Disclosure
 
 The foundation of this tool came from my PowerShell tool [NIC_Changer](https://github.com/mefranklin6/NIC_Changer), and AI did most of the translation of the PowerShell backend to Dart and Flutter. NIC_Changer had a human review every line of code, and this project builds on top of that, but is not so strictly reviewed.
 
 ## Changelog
+
+### v1.1.0
+
+ 13 October 2026
+
+- Add raw mDNS listener export feature
+- Add mDNS message column to the mDNS listener
+- Check for app update on launch
+
+### v1.0.0
 
 8 October 2026
 

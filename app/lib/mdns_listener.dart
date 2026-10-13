@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -11,12 +12,18 @@ class MdnsPacket {
     required this.sourceAddress,
     required this.hostnames,
     required this.advertisedAddresses,
+    required this.timestamp,
+    required this.sourcePort,
+    required this.payload,
   });
 
   final String macAddress;
   final String sourceAddress;
   final Set<String> hostnames;
   final Set<String> advertisedAddresses;
+  final DateTime timestamp;
+  final int sourcePort;
+  final Uint8List payload;
 }
 
 class MdnsListenerController {
@@ -121,7 +128,12 @@ class MdnsListenerController {
         if (event != RawSocketEvent.read) return;
         Datagram? datagram;
         while ((datagram = socket.receive()) != null) {
-          _emitPacket('', datagram!.address.address, datagram.data);
+          _emitPacket(
+            '',
+            datagram!.address.address,
+            datagram.port,
+            datagram.data,
+          );
         }
       }),
     );
@@ -146,7 +158,12 @@ class MdnsListenerController {
     }
   }
 
-  void _emitPacket(String mac, String source, Uint8List payload) {
+  void _emitPacket(
+    String mac,
+    String source,
+    int sourcePort,
+    Uint8List payload,
+  ) {
     if (!_running) return;
     final records = parseMdnsPacket(payload);
     onPacket(
@@ -155,9 +172,188 @@ class MdnsListenerController {
         sourceAddress: _withoutScope(source),
         hostnames: records.hostnames,
         advertisedAddresses: records.addresses,
+        timestamp: DateTime.now(),
+        sourcePort: sourcePort,
+        payload: Uint8List.fromList(payload),
       ),
     );
   }
+}
+
+class MdnsEntry {
+  const MdnsEntry({
+    required this.section,
+    required this.name,
+    required this.type,
+    required this.dnsClass,
+    required this.unicastOrFlush,
+    this.ttl,
+    this.data = '',
+    this.rawData = '',
+  });
+
+  final String section;
+  final String name;
+  final int type;
+  final int dnsClass;
+  final bool unicastOrFlush;
+  final int? ttl;
+  final String data;
+  final String rawData;
+}
+
+class MdnsMessage {
+  const MdnsMessage({
+    required this.id,
+    required this.flags,
+    required this.questionCount,
+    required this.answerCount,
+    required this.authorityCount,
+    required this.additionalCount,
+    required this.entries,
+    this.parseError = '',
+  });
+
+  final int? id;
+  final int? flags;
+  final int? questionCount;
+  final int? answerCount;
+  final int? authorityCount;
+  final int? additionalCount;
+  final List<MdnsEntry> entries;
+  final String parseError;
+}
+
+/// Parses every DNS section while preserving the raw packet if a field is bad.
+MdnsMessage inspectMdnsPacket(Uint8List bytes) {
+  if (bytes.length < 12) {
+    return const MdnsMessage(
+      id: null,
+      flags: null,
+      questionCount: null,
+      answerCount: null,
+      authorityCount: null,
+      additionalCount: null,
+      entries: [],
+      parseError: 'Truncated DNS header',
+    );
+  }
+  final view = ByteData.sublistView(bytes);
+  final counts = [
+    for (final offset in [4, 6, 8, 10]) view.getUint16(offset),
+  ];
+  final entries = <MdnsEntry>[];
+  var offset = 12;
+  var error = '';
+  try {
+    for (var section = 0; section < 4; section++) {
+      for (var index = 0; index < counts[section]; index++) {
+        final owner = _readDnsName(bytes, offset);
+        offset = owner.nextOffset;
+        if (offset + (section == 0 ? 4 : 10) > bytes.length) {
+          throw const FormatException('Truncated DNS entry');
+        }
+        final type = view.getUint16(offset);
+        final classBits = view.getUint16(offset + 2);
+        offset += 4;
+        if (section == 0) {
+          entries.add(
+            MdnsEntry(
+              section: 'question',
+              name: owner.value,
+              type: type,
+              dnsClass: classBits & 0x7fff,
+              unicastOrFlush: classBits & 0x8000 != 0,
+            ),
+          );
+          continue;
+        }
+        final ttl = view.getUint32(offset);
+        final length = view.getUint16(offset + 4);
+        offset += 6;
+        final end = offset + length;
+        if (end > bytes.length) {
+          throw const FormatException('Truncated record data');
+        }
+        final raw = bytes.sublist(offset, end);
+        String decoded;
+        try {
+          decoded = _decodeRecord(bytes, offset, end, type);
+        } on Object {
+          decoded = '';
+        }
+        entries.add(
+          MdnsEntry(
+            section: const [
+              'question',
+              'answer',
+              'authority',
+              'additional',
+            ][section],
+            name: owner.value,
+            type: type,
+            dnsClass: classBits & 0x7fff,
+            unicastOrFlush: classBits & 0x8000 != 0,
+            ttl: ttl,
+            data: decoded,
+            rawData: base64.encode(raw),
+          ),
+        );
+        offset = end;
+      }
+    }
+  } on Object catch (exception) {
+    error = exception.toString();
+  }
+  if (error.isEmpty && offset != bytes.length) {
+    error = 'Trailing ${bytes.length - offset} bytes';
+  }
+  return MdnsMessage(
+    id: view.getUint16(0),
+    flags: view.getUint16(2),
+    questionCount: counts[0],
+    answerCount: counts[1],
+    authorityCount: counts[2],
+    additionalCount: counts[3],
+    entries: entries,
+    parseError: error,
+  );
+}
+
+String _decodeRecord(Uint8List bytes, int start, int end, int type) {
+  if (type == 1 && end - start == 4) return bytes.sublist(start, end).join('.');
+  if (type == 28 && end - start == 16) {
+    return InternetAddress.fromRawAddress(bytes.sublist(start, end)).address;
+  }
+  if (type == 12 || type == 5 || type == 2 || type == 39) {
+    final name = _readDnsName(bytes, start);
+    if (name.nextOffset > end) throw const FormatException();
+    return name.value;
+  }
+  if (type == 33 && end - start >= 6) {
+    final view = ByteData.sublistView(bytes);
+    final target = _readDnsName(bytes, start + 6);
+    if (target.nextOffset > end) throw const FormatException();
+    return 'priority=${view.getUint16(start)}; weight=${view.getUint16(start + 2)}; '
+        'port=${view.getUint16(start + 4)}; target=${target.value}';
+  }
+  if (type == 16) {
+    final values = <String>[];
+    var offset = start;
+    while (offset < end) {
+      final length = bytes[offset++];
+      if (offset + length > end) throw const FormatException();
+      values.add(
+        utf8.decode(
+          bytes.sublist(offset, offset + length),
+          allowMalformed: true,
+        ),
+      );
+      offset += length;
+    }
+    return jsonEncode(values);
+  }
+  return '';
 }
 
 class MdnsRecords {

@@ -5,8 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'mdns_listener.dart';
+import 'mdns_csv.dart';
 import 'models.dart';
 import 'windows_network_probe.dart';
+import 'windows_save_dialog.dart';
 
 class MdnsListenerDialog extends StatefulWidget {
   const MdnsListenerDialog({super.key, required this.adapter});
@@ -19,6 +21,7 @@ class MdnsListenerDialog extends StatefulWidget {
 
 class _MdnsListenerDialogState extends State<MdnsListenerDialog> {
   final Map<String, _ObservedDevice> _devices = {};
+  final List<MdnsPacket> _packets = [];
   final TextEditingController _searchController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   MdnsListenerController? _listener;
@@ -109,6 +112,8 @@ class _MdnsListenerDialogState extends State<MdnsListenerDialog> {
 
   void _onPacket(MdnsPacket packet) {
     if (!mounted || !_running && !_starting) return;
+    _packets.add(packet);
+    _scheduleRefresh();
     final localMac = widget.adapter.macAddress.toUpperCase();
     if (packet.macAddress.isNotEmpty &&
         packet.macAddress.toUpperCase() == localMac) {
@@ -120,43 +125,26 @@ class _MdnsListenerDialogState extends State<MdnsListenerDialog> {
     };
     if (localAddresses.contains(packet.sourceAddress)) return;
 
-    final mac = packet.macAddress.toUpperCase();
-    _ObservedDevice? device;
-    String key;
-    if (mac.isNotEmpty) {
-      key = mac;
-      device = _devices[key];
-      if (device == null) {
-        final prior = _devices.entries
-            .where(
-              (entry) =>
-                  entry.value.macAddress.isEmpty &&
-                  entry.value.addresses.contains(packet.sourceAddress),
-            )
-            .firstOrNull;
-        if (prior != null) {
-          device = prior.value;
-          _devices.remove(prior.key);
-        }
-      }
-    } else {
-      final prior = _devices.entries
-          .where(
-            (entry) => entry.value.addresses.contains(packet.sourceAddress),
-          )
-          .firstOrNull;
-      device = prior?.value;
-      key = prior?.key ?? 'ip:${packet.sourceAddress}';
+    final device = _devices.putIfAbsent(
+      packet.sourceAddress,
+      () => _ObservedDevice(
+        sourceAddress: packet.sourceAddress,
+        firstSeen: packet.timestamp,
+      ),
+    );
+    if (packet.macAddress.isNotEmpty) {
+      device.macAddress = packet.macAddress.toUpperCase();
     }
-    device ??= _ObservedDevice(firstSeen: DateTime.now());
-    if (mac.isNotEmpty) device.macAddress = mac;
+    final decoded = inspectMdnsPacket(packet.payload).entries
+        .where((entry) => entry.section != 'question' && entry.data.isNotEmpty)
+        .map((entry) => entry.data);
     device
       ..addresses.add(packet.sourceAddress)
       ..addresses.addAll(packet.advertisedAddresses)
       ..hostnames.addAll(packet.hostnames)
-      ..lastSeen = DateTime.now();
+      ..decodedData.addAll(decoded)
+      ..lastSeen = packet.timestamp;
     device.packetCount++;
-    _devices[mac.isNotEmpty ? mac : key] = device;
     _scheduleRefresh();
   }
 
@@ -174,32 +162,11 @@ class _MdnsListenerDialogState extends State<MdnsListenerDialog> {
         widget.adapter.interfaceIndex,
       );
       var changed = false;
-      for (final entry in _devices.entries.toList()) {
-        final device = entry.value;
+      for (final device in _devices.values) {
         if (device.macAddress.isNotEmpty) continue;
-        String? mac;
-        for (final address in device.addresses) {
-          mac = neighbors[address];
-          if (mac != null) break;
-        }
+        final mac = neighbors[device.sourceAddress];
         if (mac == null || mac.isEmpty) continue;
-        _devices.remove(entry.key);
-        final existing = _devices[mac];
-        if (existing == null) {
-          device.macAddress = mac;
-          _devices[mac] = device;
-        } else {
-          existing
-            ..addresses.addAll(device.addresses)
-            ..hostnames.addAll(device.hostnames)
-            ..packetCount += device.packetCount;
-          if (device.firstSeen.isBefore(existing.firstSeen)) {
-            existing.firstSeen = device.firstSeen;
-          }
-          if (device.lastSeen.isAfter(existing.lastSeen)) {
-            existing.lastSeen = device.lastSeen;
-          }
-        }
+        device.macAddress = mac;
         changed = true;
       }
       if (changed) setState(() {});
@@ -225,18 +192,26 @@ class _MdnsListenerDialogState extends State<MdnsListenerDialog> {
     final values = _devices.values.where((device) {
       if (_searchQuery.isEmpty) return true;
       return device.macAddress.toLowerCase().contains(_searchQuery) ||
+          device.sourceAddress.toLowerCase().contains(_searchQuery) ||
           device.addresses.any(
             (address) => address.toLowerCase().contains(_searchQuery),
           ) ||
           device.hostnames.any(
             (hostname) => hostname.toLowerCase().contains(_searchQuery),
+          ) ||
+          device.decodedData.any(
+            (value) => value.toLowerCase().contains(_searchQuery),
           );
     }).toList();
     int compare(_ObservedDevice left, _ObservedDevice right) {
       return switch (_sortColumn) {
         1 => _firstHostname(left).compareTo(_firstHostname(right)),
         2 => left.macAddress.compareTo(right.macAddress),
-        _ => _compareAddresses(_firstAddress(left), _firstAddress(right)),
+        3 =>
+          left.sortedDecodedData
+              .join(', ')
+              .compareTo(right.sortedDecodedData.join(', ')),
+        _ => _compareAddresses(left.sourceAddress, right.sourceAddress),
       };
     }
 
@@ -245,9 +220,6 @@ class _MdnsListenerDialogState extends State<MdnsListenerDialog> {
     );
     return values;
   }
-
-  String _firstAddress(_ObservedDevice device) =>
-      device.sortedAddresses.firstOrNull ?? '';
 
   String _firstHostname(_ObservedDevice device) =>
       (device.sortedHostnames.firstOrNull ?? '').toLowerCase();
@@ -281,12 +253,15 @@ class _MdnsListenerDialogState extends State<MdnsListenerDialog> {
 
   Future<void> _copy() async {
     final devices = _visibleDevices;
-    final output = StringBuffer('IP Addresses\tHostnames\tMAC Address\r\n');
+    final output = StringBuffer(
+      'Source IP\tIP Addresses\tHostnames\tMAC Address\tDecoded Data\r\n',
+    );
     for (final device in devices) {
       output.writeln(
-        '${device.sortedAddresses.join(', ')}\t'
+        '${device.sourceAddress}\t${device.sortedAddresses.join(', ')}\t'
         '${device.sortedHostnames.join(', ')}\t'
-        '${device.macAddress.isEmpty ? '(unavailable)' : device.macAddress}',
+        '${device.macAddress.isEmpty ? '(unavailable)' : device.macAddress}\t'
+        '${device.sortedDecodedData.join('; ')}',
       );
     }
     await Clipboard.setData(ClipboardData(text: output.toString()));
@@ -294,6 +269,33 @@ class _MdnsListenerDialogState extends State<MdnsListenerDialog> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Copied ${devices.length} devices.')),
       );
+    }
+  }
+
+  Future<void> _export() async {
+    final captured = List<MdnsPacket>.of(_packets);
+    final now = DateTime.now();
+    String two(int value) => value.toString().padLeft(2, '0');
+    final name =
+        'mdns-capture-${now.year}${two(now.month)}${two(now.day)}-'
+        '${two(now.hour)}${two(now.minute)}${two(now.second)}.csv';
+    final path = showCsvSaveDialog(name, title: 'Export mDNS Capture');
+    if (path == null) return;
+    try {
+      await File(path).writeAsString(buildMdnsCsv(captured));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Saved ${captured.length} mDNS packets to $path'),
+          ),
+        );
+      }
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not export mDNS capture: $error')),
+        );
+      }
     }
   }
 
@@ -339,7 +341,7 @@ class _MdnsListenerDialogState extends State<MdnsListenerDialog> {
                           ),
                           const SizedBox(height: 3),
                           Text(
-                            '${widget.adapter.alias} · ${_devices.length} unique devices',
+                            '${widget.adapter.alias} · ${_devices.length} source IPs',
                             style: TextStyle(color: scheme.onSurfaceVariant),
                           ),
                         ],
@@ -374,8 +376,8 @@ class _MdnsListenerDialogState extends State<MdnsListenerDialog> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'Passively records source IPs that send IPv4 or IPv6 mDNS traffic. '
-                      'Hostnames and advertised addresses appear when present; MAC is optional.',
+                      'Groups mDNS advertisements by source IP. Decoded Data includes '
+                      'service names, addresses, and other record values; MAC is optional.',
                       style: TextStyle(color: scheme.onSurfaceVariant),
                     ),
                   ],
@@ -393,7 +395,7 @@ class _MdnsListenerDialogState extends State<MdnsListenerDialog> {
                   enabled: _devices.isNotEmpty,
                   decoration: InputDecoration(
                     labelText: 'Filter devices',
-                    hintText: 'Hostname, MAC address, or IP address',
+                    hintText: 'IP, hostname, MAC, or decoded data',
                     prefixIcon: const Icon(Icons.search),
                     suffixIcon: _searchController.text.isEmpty
                         ? null
@@ -446,17 +448,29 @@ class _MdnsListenerDialogState extends State<MdnsListenerDialog> {
                                           final mac = device.macAddress.isEmpty
                                               ? '(unavailable)'
                                               : device.macAddress;
-                                          final ips = device.sortedAddresses
-                                              .join(', ');
+                                          final ips = [
+                                            device.sourceAddress,
+                                            ...device.sortedAddresses.where(
+                                              (address) =>
+                                                  address !=
+                                                  device.sourceAddress,
+                                            ),
+                                          ].join(', ');
                                           final names =
                                               device.sortedHostnames.isEmpty
                                               ? '(not advertised)'
                                               : device.sortedHostnames.join(
                                                   ', ',
                                                 );
+                                          final decoded =
+                                              device.sortedDecodedData.isEmpty
+                                              ? '(none)'
+                                              : device.sortedDecodedData.join(
+                                                  ', ',
+                                                );
                                           return Semantics(
                                             label:
-                                                'MAC address $mac, IP addresses $ips, hostnames $names',
+                                                'Source IP ${device.sourceAddress}, MAC address $mac, IP addresses $ips, hostnames $names, decoded data $decoded',
                                             child: ExcludeSemantics(
                                               child: ColoredBox(
                                                 color: index.isEven
@@ -485,7 +499,7 @@ class _MdnsListenerDialogState extends State<MdnsListenerDialog> {
                                                       ),
                                                     ),
                                                     Expanded(
-                                                      flex: 3,
+                                                      flex: 2,
                                                       child: Tooltip(
                                                         message: names,
                                                         child: Padding(
@@ -503,8 +517,29 @@ class _MdnsListenerDialogState extends State<MdnsListenerDialog> {
                                                         ),
                                                       ),
                                                     ),
+                                                    Expanded(
+                                                      flex: 3,
+                                                      child: Tooltip(
+                                                        message: device
+                                                            .sortedDecodedData
+                                                            .join('\n'),
+                                                        child: Padding(
+                                                          padding:
+                                                              const EdgeInsets.symmetric(
+                                                                horizontal: 12,
+                                                              ),
+                                                          child: Text(
+                                                            decoded,
+                                                            maxLines: 1,
+                                                            overflow:
+                                                                TextOverflow
+                                                                    .ellipsis,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    ),
                                                     SizedBox(
-                                                      width: 205,
+                                                      width: 175,
                                                       child: Padding(
                                                         padding:
                                                             const EdgeInsets.symmetric(
@@ -542,9 +577,17 @@ class _MdnsListenerDialogState extends State<MdnsListenerDialog> {
                       label: const Text('Copy report'),
                     ),
                     OutlinedButton.icon(
-                      onPressed: _devices.isEmpty
+                      onPressed: _packets.isEmpty ? null : _export,
+                      icon: const Icon(Icons.file_download_outlined),
+                      label: const Text('Export CSV'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _devices.isEmpty && _packets.isEmpty
                           ? null
-                          : () => setState(_devices.clear),
+                          : () => setState(() {
+                              _devices.clear();
+                              _packets.clear();
+                            }),
                       icon: const Icon(Icons.delete_sweep_outlined),
                       label: const Text('Clear'),
                     ),
@@ -581,9 +624,10 @@ class _MdnsListenerDialogState extends State<MdnsListenerDialog> {
       color: scheme.surfaceContainerLow,
       child: Row(
         children: [
-          Expanded(flex: 2, child: _sortButton('IP addresses', 0)),
-          Expanded(flex: 3, child: _sortButton('Hostnames', 1)),
-          SizedBox(width: 205, child: _sortButton('MAC address (if known)', 2)),
+          Expanded(flex: 2, child: _sortButton('Source / advertised IPs', 0)),
+          Expanded(flex: 2, child: _sortButton('Hostnames', 1)),
+          Expanded(flex: 3, child: _sortButton('Decoded Data', 3)),
+          SizedBox(width: 175, child: _sortButton('MAC address (if known)', 2)),
         ],
       ),
     );
@@ -622,15 +666,19 @@ class _MdnsListenerDialogState extends State<MdnsListenerDialog> {
 }
 
 class _ObservedDevice {
-  _ObservedDevice({required this.firstSeen}) : lastSeen = firstSeen;
+  _ObservedDevice({required this.sourceAddress, required this.firstSeen})
+    : lastSeen = firstSeen;
 
+  final String sourceAddress;
   String macAddress = '';
   final Set<String> addresses = {};
   final Set<String> hostnames = {};
+  final Set<String> decodedData = {};
   DateTime firstSeen;
   DateTime lastSeen;
   int packetCount = 0;
 
   List<String> get sortedAddresses => addresses.toList()..sort();
   List<String> get sortedHostnames => hostnames.toList()..sort();
+  List<String> get sortedDecodedData => decodedData.toList()..sort();
 }

@@ -81,7 +81,7 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
       final savedTheme = initialization['theme'] as String? ?? 'Dark';
       widget.onThemeModeChanged(_themeModeFromString(savedTheme));
       if (widget.backend is WindowsNetworkBackend) {
-        unawaited(_checkForUpdates(silent: true));
+        unawaited(_checkForUpdates(silent: true, promptIfAvailable: true));
       }
       await _refreshAdapters();
     } on Object catch (error) {
@@ -123,7 +123,10 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
     unawaited(_setTheme(next));
   }
 
-  Future<void> _checkForUpdates({required bool silent}) async {
+  Future<void> _checkForUpdates({
+    required bool silent,
+    bool promptIfAvailable = false,
+  }) async {
     if (_checkingForUpdate) return;
     final updateService = _updateService;
     if (updateService == null) {
@@ -135,12 +138,10 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
       final release = await updateService.checkForUpdate(_appVersion);
       if (!mounted) return;
       setState(() => _availableUpdate = release);
-      if (!silent) {
-        if (release == null) {
-          _showMessage('AV Network Toolbag $_appVersion is up to date.');
-        } else {
-          await _showUpdateAvailable(release);
-        }
+      if (release != null && (promptIfAvailable || !silent)) {
+        await _showUpdateAvailable(release);
+      } else if (!silent && release == null) {
+        _showMessage('AV Network Toolbag $_appVersion is up to date.');
       }
     } on Object catch (error) {
       if (!silent && mounted) {

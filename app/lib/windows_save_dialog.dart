@@ -3,13 +3,16 @@ import 'dart:ffi';
 import 'package:ffi/ffi.dart';
 import 'package:win32/win32.dart';
 
-String? showCsvSaveDialog(String suggestedName) {
+String? showCsvSaveDialog(
+  String suggestedName, {
+  String title = 'Export Subnet Scan',
+}) {
   final dialog = calloc<OPENFILENAME>();
   final fileBuffer = calloc<Uint16>(32768);
   final filter = _utf16Buffer(
     'CSV files (*.csv)\x00*.csv\x00All files (*.*)\x00*.*\x00\x00',
   );
-  final title = _utf16Buffer('Export Subnet Scan');
+  final titleBuffer = _utf16Buffer(title);
   final extension = _utf16Buffer('csv');
   try {
     PWSTR(fileBuffer.cast()).setString(suggestedName);
@@ -20,7 +23,7 @@ String? showCsvSaveDialog(String suggestedName) {
       ..nFilterIndex = 1
       ..lpstrFile = PWSTR(fileBuffer.cast())
       ..nMaxFile = 32768
-      ..lpstrTitle = PWSTR(title.cast())
+      ..lpstrTitle = PWSTR(titleBuffer.cast())
       ..Flags = const OPEN_FILENAME_FLAGS(
         0x00000002 | // OFN_OVERWRITEPROMPT
             0x00000008 | // OFN_NOCHANGEDIR
@@ -31,7 +34,7 @@ String? showCsvSaveDialog(String suggestedName) {
     return PWSTR(fileBuffer.cast()).toDartString();
   } finally {
     calloc.free(extension);
-    calloc.free(title);
+    calloc.free(titleBuffer);
     calloc.free(filter);
     calloc.free(fileBuffer);
     calloc.free(dialog);

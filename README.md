@@ -15,6 +15,7 @@ Windows Network Tools for the AV Pro, the IoT Technician, and the home-lab.
 ## Features
 
 - Quickly change multiple network interfaces between **DHCP, Link-Local, and Static IP** assignments
+- Save and recall **custom presets** for IPv4 addresses
 - Host a temporary **local DHCP server** on networks where none are present
 - **Scan subnets** to find and report device IP's, hostnames, and MAC addresses
 - **Listen to multicast mDNS** traffic on an interface to find information of devices not on your current subnet
@@ -48,6 +49,12 @@ Windows is likely to flag the installer and program as potentially dangerous: Co
 The foundation of this tool came from my PowerShell tool [NIC_Changer](https://github.com/mefranklin6/NIC_Changer), and AI did most of the translation of the PowerShell backend to Dart and Flutter. NIC_Changer had a human review every line of code, and this project builds on top of that, but is not so strictly reviewed.
 
 ## Changelog
+
+### v1.2.0
+
+19 October 2026
+
+- Add save and recall IPv4 preset feature. Thanks for the suggestion Isaac!
 
 ### v1.1.0
 

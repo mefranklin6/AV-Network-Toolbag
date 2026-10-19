@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'app_theme.dart';
 import 'backend_service.dart';
 import 'home_screen.dart';
+import 'ipv4_presets.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -13,9 +14,10 @@ void main() {
 }
 
 class AvNetworkToolbagApp extends StatefulWidget {
-  const AvNetworkToolbagApp({super.key, this.backend});
+  const AvNetworkToolbagApp({super.key, this.backend, this.presetStore});
 
   final NetworkBackend? backend;
+  final Ipv4PresetStore? presetStore;
 
   @override
   State<AvNetworkToolbagApp> createState() => _AvNetworkToolbagAppState();
@@ -82,6 +84,7 @@ class _AvNetworkToolbagAppState extends State<AvNetworkToolbagApp> {
       ),
     ),
     home: NetworkHomeScreen(
+      presetStore: widget.presetStore,
       backend: _backend,
       themeMode: _themeMode,
       onThemeModeChanged: (mode) => setState(() => _themeMode = mode),

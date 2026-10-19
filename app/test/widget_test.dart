@@ -1,13 +1,167 @@
 import 'dart:async';
 import 'dart:ui';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:av_network_toolbag/backend_service.dart';
 import 'package:av_network_toolbag/main.dart';
 import 'package:av_network_toolbag/models.dart';
+import 'package:av_network_toolbag/ipv4_presets.dart';
+import 'package:av_network_toolbag/ipv4_presets_dialog.dart';
 
 void main() {
+  testWidgets('manage, rename, recall and delete an IPv4 preset', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1400, 1800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final store = _MemoryPresetStore();
+    final backend = _FakeBackend();
+    await tester.pumpWidget(
+      AvNetworkToolbagApp(backend: backend, presetStore: store),
+    );
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextField, 'IP address'),
+      '10.42.0.10',
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('ipv4-presets-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Manage presets').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add preset'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(find.text('Enter a preset name'), findsOneWidget);
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Preset name'),
+      'Stage',
+    );
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
+    expect(store.presets.single.name, 'Stage');
+    expect(
+      tester.getCenter(find.text('10.42.0.10/24')).dy,
+      tester.getCenter(find.text('Rename')).dy,
+    );
+    expect(
+      tester.getCenter(find.text('10.42.0.10/24')).dy,
+      tester.getCenter(find.text('Delete')).dy,
+    );
+    await tester.tap(find.text('Open JSON'));
+    await tester.pumpAndSettle();
+    expect(store.revealCalls, 1);
+    await tester.tap(find.text('Rename'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Preset name'),
+      'Stage renamed',
+    );
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(store.presets.single.name, 'Stage renamed');
+    expect(store.presets.single.address, '10.42.0.10');
+    await tester.tap(find.text('Done'));
+    await tester.pumpAndSettle();
+    // Load a different prefix so recall must update both the field and state.
+    store.presets = [
+      const Ipv4Preset(name: 'Stage', address: '10.42.0.10', prefixLength: 16),
+    ];
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(
+      AvNetworkToolbagApp(backend: backend, presetStore: store),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('ipv4-presets-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Stage (10.42.0.10/16)'));
+    await tester.pumpAndSettle();
+    expect(find.text('Set static IPv4 to 10.42.0.10/16'), findsOneWidget);
+    expect(
+      tester
+          .widget<DropdownButtonFormField<int>>(
+            find.byType(DropdownButtonFormField<int>),
+          )
+          .initialValue,
+      16,
+    );
+    expect(backend.staticCalls, 0);
+    await tester.tap(find.text('Set static IPv4 to 10.42.0.10/16'));
+    await tester.pumpAndSettle();
+    expect(backend.staticCalls, 1);
+    expect(backend.lastPrefix, 16);
+    await tester.tap(find.byKey(const ValueKey('ipv4-presets-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Manage presets').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete').last);
+    await tester.pumpAndSettle();
+    expect(store.presets, isEmpty);
+    await tester.tap(find.text('Done'));
+    await tester.pumpAndSettle();
+    tester.view.physicalSize = const Size(640, 900);
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Presets'));
+    await tester.tap(find.byKey(const ValueKey('ipv4-presets-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Manage presets').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Add preset'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('malformed presets can be revealed and reloaded after repair', (
+    tester,
+  ) async {
+    final store = _MemoryPresetStore()
+      ..loadError = const FormatException('Invalid JSON');
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Ipv4PresetsDialog(
+          store: store,
+          onChanged: (_) {},
+          initialAddress: '',
+          initialPrefix: 24,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Fix the JSON file and reload'), findsOneWidget);
+    expect(
+      tester
+          .widget<OutlinedButton>(
+            find.widgetWithText(OutlinedButton, 'Add preset'),
+          )
+          .onPressed,
+      isNull,
+    );
+    await tester.tap(find.text('Open JSON'));
+    await tester.pumpAndSettle();
+    expect(store.revealCalls, 1);
+    store.loadError = null;
+    await tester.tap(find.text('Reload'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Fix the JSON file and reload'), findsNothing);
+    expect(
+      tester
+          .widget<OutlinedButton>(
+            find.widgetWithText(OutlinedButton, 'Add preset'),
+          )
+          .onPressed,
+      isNotNull,
+    );
+  });
+
   testWidgets('window exit waits for backend cleanup', (tester) async {
     final backend = _FakeBackend()..closeGate = Completer<void>();
     await tester.pumpWidget(AvNetworkToolbagApp(backend: backend));
@@ -53,6 +207,8 @@ void main() {
 }
 
 class _FakeBackend implements NetworkBackend {
+  int staticCalls = 0;
+  int? lastPrefix;
   Completer<void>? closeGate;
   Object? closeError;
   int closeCalls = 0;
@@ -135,7 +291,10 @@ class _FakeBackend implements NetworkBackend {
     String interfaceAlias,
     String address,
     int prefixLength,
-  ) async {}
+  ) async {
+    staticCalls++;
+    lastPrefix = prefixLength;
+  }
 
   @override
   Future<void> setDhcp(String interfaceAlias) async {}
@@ -209,4 +368,23 @@ class _FakeBackend implements NetworkBackend {
     if (closeError != null) throw closeError!;
     await closeGate?.future;
   }
+}
+
+class _MemoryPresetStore extends Ipv4PresetStore {
+  List<Ipv4Preset> presets = [];
+  Object? loadError;
+  int revealCalls = 0;
+  @override
+  Future<List<Ipv4Preset>> load() async {
+    if (loadError != null) throw loadError!;
+    return List.of(presets);
+  }
+
+  @override
+  Future<void> revealInExplorer() async {
+    revealCalls++;
+  }
+
+  @override
+  Future<void> save(List<Ipv4Preset> values) async => presets = List.of(values);
 }

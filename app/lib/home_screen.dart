@@ -10,6 +10,8 @@ import 'common_widgets.dart';
 import 'dhcp_dialog.dart';
 import 'mdns_dialog.dart';
 import 'models.dart';
+import 'ipv4_presets.dart';
+import 'ipv4_presets_dialog.dart';
 import 'scan_dialog.dart';
 import 'update_service.dart';
 
@@ -19,11 +21,13 @@ class NetworkHomeScreen extends StatefulWidget {
     required this.backend,
     required this.themeMode,
     required this.onThemeModeChanged,
+    this.presetStore,
   });
 
   final NetworkBackend backend;
   final ThemeMode themeMode;
   final ValueChanged<ThemeMode> onThemeModeChanged;
+  final Ipv4PresetStore? presetStore;
 
   @override
   State<NetworkHomeScreen> createState() => _NetworkHomeScreenState();
@@ -31,6 +35,9 @@ class NetworkHomeScreen extends StatefulWidget {
 
 class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
   final _ipController = TextEditingController();
+  late final _presetStore = widget.presetStore ?? Ipv4PresetStore();
+  List<Ipv4Preset> _presets = [];
+  String? _presetError;
   UpdateService? _updateService;
   final Map<String, String> _capturedAddresses = {};
   List<AdapterSummary> _adapters = const [];
@@ -63,6 +70,7 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
       setState(() {});
     });
     unawaited(_initialize());
+    unawaited(_loadPresets());
   }
 
   @override
@@ -459,16 +467,79 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
   }
 
   bool _validIpv4(String value) {
-    final parts = value.trim().split('.');
-    if (parts.length != 4) return false;
-    return parts.every((part) {
-      final number = int.tryParse(part);
-      return number != null &&
-          number >= 0 &&
-          number <= 255 &&
-          number.toString() == part.replaceFirst(RegExp(r'^0+(?=\d)'), '');
-    });
+    return Ipv4Preset.validAddress(value);
   }
+
+  Future<void> _loadPresets() async {
+    try {
+      final presets = await _presetStore.load();
+      if (mounted) {
+        setState(() {
+          _presets = presets;
+          _presetError = null;
+        });
+      }
+    } on Object catch (error) {
+      if (mounted) {
+        setState(() => _presetError = 'Could not load presets: $error');
+      }
+    }
+  }
+
+  Future<void> _managePresets() async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => Ipv4PresetsDialog(
+        store: _presetStore,
+        initialAddress: _ipController.text.trim(),
+        initialPrefix: _prefixLength,
+        onChanged: (presets) {
+          if (!mounted) return;
+          setState(() {
+            _presets = presets;
+            _presetError = null;
+          });
+        },
+      ),
+    );
+  }
+
+  Widget _buildPresetDropdown(bool canChange) => InputDecorator(
+    decoration: const InputDecoration(labelText: 'IPv4 presets'),
+    child: DropdownButtonHideUnderline(
+      child: DropdownButton<int>(
+        key: const ValueKey('ipv4-presets-menu'),
+        isExpanded: true,
+        hint: const Text('Presets'),
+        items: [
+          for (var index = 0; index < _presets.length; index++)
+            DropdownMenuItem(
+              value: index,
+              enabled: canChange,
+              child: Text(
+                '${_presets[index].name} (${_presets[index].address}/${_presets[index].prefixLength})',
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          const DropdownMenuItem(value: -1, child: Text('Manage presets')),
+        ],
+        onChanged: (index) {
+          // This is an action menu; keep the prompt visible after each selection.
+          if (index == -1) {
+            unawaited(_managePresets());
+          } else if (index != null && canChange) {
+            final preset = _presets[index];
+            setState(() => _prefixLength = preset.prefixLength);
+            _ipController.text = preset.address;
+            _showMessage(
+              'Recalled ${preset.name}. Use Set static IPv4 to apply.',
+            );
+          }
+        },
+      ),
+    ),
+  );
 
   void _captureCurrentAddress() {
     final address = _details?.primaryIpv4;
@@ -1282,6 +1353,7 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
                   ),
                 );
                 final prefixField = DropdownButtonFormField<int>(
+                  key: ValueKey(_prefixLength),
                   initialValue: _prefixLength,
                   isExpanded: true,
                   decoration: const InputDecoration(labelText: 'CIDR prefix'),
@@ -1343,15 +1415,32 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
               },
             ),
             const SizedBox(height: 14),
-            FilledButton.icon(
-              onPressed: canChange && validAddress ? _setStatic : null,
-              icon: const Icon(Icons.save_outlined),
-              label: Text(
-                validAddress
-                    ? 'Set static IPv4 to ${_ipController.text.trim()}/$_prefixLength'
-                    : 'Enter an IPv4 address',
+            IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(
+                    flex: 3,
+                    child: FilledButton.icon(
+                      onPressed: canChange && validAddress ? _setStatic : null,
+                      icon: const Icon(Icons.save_outlined),
+                      label: Text(
+                        validAddress
+                            ? 'Set static IPv4 to ${_ipController.text.trim()}/$_prefixLength'
+                            : 'Enter an IPv4 address',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(flex: 2, child: _buildPresetDropdown(canChange)),
+                ],
               ),
             ),
+            if (_presetError != null)
+              Text(
+                _presetError!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
             const SizedBox(height: 14),
             LayoutBuilder(
               builder: (context, constraints) {

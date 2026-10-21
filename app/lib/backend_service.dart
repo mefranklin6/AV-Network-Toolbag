@@ -909,25 +909,13 @@ class WindowsNetworkBackend implements NetworkBackend {
       rule,
     );
     try {
-      await _runWindowsCommand(
-        'netsh.exe',
-        [
-          'advfirewall',
-          'firewall',
-          'add',
-          'rule',
-          'name=$rule',
-          'dir=in',
-          'action=allow',
-          'protocol=UDP',
-          'localport=67',
-          'localip=${configuration.serverAddress}',
-          'profile=any',
-          'enable=yes',
-        ],
-        failurePrefix:
-            'Windows could not create the temporary DHCP firewall rule.',
-      );
+      // Scope by adapter, not destination IP: initial DHCP requests arrive
+      // at the broadcast address before the client has an IPv4 address.
+      await const MethodChannel('av_network_toolbag/firewall')
+          .invokeMethod<void>('addDhcpRule', {
+            'name': rule,
+            'interfaceAlias': configuration.adapterAlias,
+          });
       final server = DartDhcpServer(configuration);
       await server.start();
       _dhcpServer = server;

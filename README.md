@@ -50,6 +50,13 @@ The foundation of this tool came from my PowerShell tool [NIC_Changer](https://g
 
 ## Changelog
 
+### v1.2.1
+
+21 October 2026
+
+- Fixed bug causing DHCP server to serve on a wrong address range if IP of adapter was changed before enabling DHCP server.
+- Fixed bug where some computers could not serve DHCP
+
 ### v1.2.0
 
 19 October 2026

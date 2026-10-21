@@ -30,6 +30,8 @@ class _DhcpServerDialogState extends State<DhcpServerDialog> {
   final _dns = TextEditingController();
   final _ntp = TextEditingController();
   final _domain = TextEditingController();
+  final _adapterServerAddress = TextEditingController();
+  final _subnetMask = TextEditingController();
 
   DhcpDefaults? _defaults;
   DhcpState? _state;
@@ -60,6 +62,8 @@ class _DhcpServerDialogState extends State<DhcpServerDialog> {
       _dns,
       _ntp,
       _domain,
+      _adapterServerAddress,
+      _subnetMask,
     ]) {
       controller.dispose();
     }
@@ -86,6 +90,10 @@ class _DhcpServerDialogState extends State<DhcpServerDialog> {
           });
         }
       }
+      // Keep the adapter address live while this dialog is open. The address
+      // can change outside this window (or immediately after a static IPv4
+      // change), so it must not be treated as a one-time dialog default.
+      await _refreshDefaults();
       _startPollingIfNeeded();
     } on Object catch (error) {
       if (mounted) setState(() => _error = error.toString());
@@ -106,23 +114,35 @@ class _DhcpServerDialogState extends State<DhcpServerDialog> {
 
   void _startPollingIfNeeded() {
     _timer?.cancel();
-    if (_state?.running == true) {
-      _timer = Timer.periodic(const Duration(seconds: 2), (_) => _poll());
-    }
+    _timer = Timer.periodic(const Duration(seconds: 2), (_) => _poll());
   }
 
   Future<void> _poll() async {
-    if (_polling || !_running) return;
+    if (_polling) return;
     _polling = true;
     try {
       final state = await widget.backend.getDhcpState();
       if (!mounted) return;
       setState(() => _state = state);
-      if (!state.running) _timer?.cancel();
+      await _refreshDefaults();
     } on Object {
-      // A transient lease refresh failure should not close the management UI.
+      // A transient state/defaults refresh failure should not close the
+      // management UI.
     } finally {
       _polling = false;
+    }
+  }
+
+  Future<void> _refreshDefaults() async {
+    try {
+      final defaults = await widget.backend.getDhcpDefaults(
+        widget.interfaceAlias,
+      );
+      if (!mounted) return;
+      setState(() => _defaults = defaults);
+    } on Object {
+      // The active server configuration can still be displayed if the
+      // adapter temporarily has no usable IPv4 address.
     }
   }
 
@@ -352,16 +372,16 @@ class _DhcpServerDialogState extends State<DhcpServerDialog> {
         _defaults?.adapterAlias ??
         widget.interfaceAlias;
     final server =
-        configuration?['serverAddress']?.toString() ??
         _defaults?.serverAddress ??
+        configuration?['serverAddress']?.toString() ??
         'Unavailable';
     final prefix =
-        configuration?['prefixLength']?.toString() ??
         _defaults?.prefixLength.toString() ??
+        configuration?['prefixLength']?.toString() ??
         '—';
     final subnet =
-        configuration?['subnetMask']?.toString() ??
         _defaults?.subnetMask ??
+        configuration?['subnetMask']?.toString() ??
         '—';
     final enabled = !_running && !_busy && _defaults != null;
     return FocusTraversalGroup(
@@ -376,8 +396,9 @@ class _DhcpServerDialogState extends State<DhcpServerDialog> {
                 'Adapter / server address',
                 '$adapter  |  $server/$prefix',
                 410,
+                _adapterServerAddress,
               ),
-              _readOnlyField('Subnet mask', subnet, 230),
+              _readOnlyField('Subnet mask', subnet, 230, _subnetMask),
               _field('Pool start', _poolStart, 220, enabled: enabled),
               _field(
                 'Pool size',
@@ -426,14 +447,27 @@ class _DhcpServerDialogState extends State<DhcpServerDialog> {
     );
   }
 
-  Widget _readOnlyField(String label, String value, double width) => SizedBox(
-    width: width,
-    child: TextFormField(
-      initialValue: value,
-      readOnly: true,
-      decoration: InputDecoration(labelText: label),
-    ),
-  );
+  Widget _readOnlyField(
+    String label,
+    String value,
+    double width,
+    TextEditingController controller,
+  ) {
+    if (controller.text != value) {
+      controller.value = TextEditingValue(
+        text: value,
+        selection: TextSelection.collapsed(offset: value.length),
+      );
+    }
+    return SizedBox(
+      width: width,
+      child: TextFormField(
+        controller: controller,
+        readOnly: true,
+        decoration: InputDecoration(labelText: label),
+      ),
+    );
+  }
 
   Widget _field(
     String label,

@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'backend_service.dart';
 import 'common_widgets.dart';
 import 'dhcp_dialog.dart';
+import 'hidden_adapters.dart';
 import 'mdns_dialog.dart';
 import 'models.dart';
 import 'ipv4_presets.dart';
@@ -22,12 +23,14 @@ class NetworkHomeScreen extends StatefulWidget {
     required this.themeMode,
     required this.onThemeModeChanged,
     this.presetStore,
+    this.hiddenAdapterStore,
   });
 
   final NetworkBackend backend;
   final ThemeMode themeMode;
   final ValueChanged<ThemeMode> onThemeModeChanged;
   final Ipv4PresetStore? presetStore;
+  final HiddenAdapterStore? hiddenAdapterStore;
 
   @override
   State<NetworkHomeScreen> createState() => _NetworkHomeScreenState();
@@ -37,6 +40,9 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
   final _ipController = TextEditingController();
   late final _presetStore = widget.presetStore ?? Ipv4PresetStore();
   List<Ipv4Preset> _presets = [];
+  HiddenAdapterStore? _hiddenAdapterStore;
+  Set<String> _hiddenAliases = {};
+  bool _showHidden = false;
   String? _presetError;
   UpdateService? _updateService;
   final Map<String, String> _capturedAddresses = {};
@@ -64,6 +70,10 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
     if (widget.backend is WindowsNetworkBackend) {
       _updateService = UpdateService();
     }
+    // Test backends must not read the user's real hidden-adapter list.
+    _hiddenAdapterStore =
+        widget.hiddenAdapterStore ??
+        (widget.backend is WindowsNetworkBackend ? HiddenAdapterStore() : null);
     _ipController.addListener(() {
       final alias = _selectedAlias;
       if (alias != null) _capturedAddresses[alias] = _ipController.text;
@@ -91,6 +101,8 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
       if (widget.backend is WindowsNetworkBackend) {
         unawaited(_checkForUpdates(silent: true, promptIfAvailable: true));
       }
+      await _loadHiddenAdapters();
+      if (!mounted) return;
       await _refreshAdapters();
     } on Object catch (error) {
       if (!mounted) return;
@@ -326,9 +338,84 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
     }
   }
 
-  List<AdapterSummary> get _visibleAdapters => _hideUplinks
+  List<AdapterSummary> get _listedAdapters => _hideUplinks
       ? _adapters.where((adapter) => !adapter.isSwitchUplink).toList()
       : _adapters;
+
+  List<AdapterSummary> get _visibleAdapters => _showHidden
+      ? _listedAdapters
+      : _listedAdapters.where((adapter) => !_isHidden(adapter.alias)).toList();
+
+  int get _hiddenCount =>
+      _listedAdapters.where((adapter) => _isHidden(adapter.alias)).length;
+
+  bool _isHidden(String alias) =>
+      _hiddenAliases.contains(HiddenAdapterStore.normalize(alias));
+
+  String? _defaultSelection(List<AdapterSummary> adapters) {
+    if (adapters.isEmpty) return null;
+    final preferred = adapters.where(
+      (adapter) => adapter.canConfigure && adapter.status == 'Up',
+    );
+    final configurable = adapters.where((adapter) => adapter.canConfigure);
+    return (preferred.firstOrNull ?? configurable.firstOrNull ?? adapters.first)
+        .alias;
+  }
+
+  Future<void> _loadHiddenAdapters() async {
+    final store = _hiddenAdapterStore;
+    if (store == null) return;
+    try {
+      final aliases = await store.load();
+      if (mounted) setState(() => _hiddenAliases = aliases);
+    } on Object catch (error) {
+      if (mounted) _showMessage('Could not load hidden adapters: $error');
+    }
+  }
+
+  Future<void> _setAdapterHidden(String alias, bool hidden) async {
+    final previous = _hiddenAliases;
+    final key = HiddenAdapterStore.normalize(alias);
+    final next = {...previous};
+    hidden ? next.add(key) : next.remove(key);
+    setState(() {
+      _hiddenAliases = next;
+      if (next.isEmpty) _showHidden = false;
+    });
+    _ensureVisibleSelection();
+    try {
+      await _hiddenAdapterStore?.save(next);
+      if (mounted) _showMessage(hidden ? 'Hid $alias' : 'Unhid $alias');
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() => _hiddenAliases = previous);
+      _showMessage('Could not save hidden adapters: $error');
+    }
+  }
+
+  void _setShowHidden(bool value) {
+    if (_showHidden == value) return;
+    setState(() => _showHidden = value);
+    _ensureVisibleSelection();
+  }
+
+  void _ensureVisibleSelection() {
+    final adapters = _visibleAdapters;
+    if (adapters.any((adapter) => adapter.alias == _selectedAlias)) return;
+    final selection = _defaultSelection(adapters);
+    if (selection != null) {
+      unawaited(_selectAdapter(selection, force: true));
+      return;
+    }
+    _detailRequest++;
+    setState(() {
+      _selectedAlias = null;
+      _details = null;
+      _diagnostics = null;
+      _loadingDetails = false;
+      _loadingDiagnostics = false;
+    });
+  }
 
   Future<void> _refreshAdapters() async {
     final request = ++_adapterRequest;
@@ -342,28 +429,26 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
         inspectHyperV: inspectHyperV,
       );
       if (!mounted || request != _adapterRequest) return;
-      final availableAdapters = inspectHyperV
-          ? adapters.where((adapter) => !adapter.isSwitchUplink).toList()
-          : adapters;
+      final availableAdapters = adapters
+          .where(
+            (adapter) =>
+                !(inspectHyperV && adapter.isSwitchUplink) &&
+                (_showHidden || !_isHidden(adapter.alias)),
+          )
+          .toList();
       var selection = _selectedAlias;
       if (!availableAdapters.any((adapter) => adapter.alias == selection)) {
-        final preferred = availableAdapters.where(
-          (adapter) => adapter.canConfigure && adapter.status == 'Up',
-        );
-        final configurable = availableAdapters.where(
-          (adapter) => adapter.canConfigure,
-        );
-        selection = availableAdapters.isEmpty
-            ? null
-            : (preferred.firstOrNull ??
-                      configurable.firstOrNull ??
-                      availableAdapters.first)
-                  .alias;
+        selection = _defaultSelection(availableAdapters);
       }
+      if (selection == null) _detailRequest++;
       setState(() {
         _adapters = adapters;
         _selectedAlias = selection;
         _loadingAdapters = false;
+        if (selection == null) {
+          _details = null;
+          _diagnostics = null;
+        }
       });
       if (selection != null) await _selectAdapter(selection, force: true);
     } on Object catch (error) {
@@ -982,6 +1067,15 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
               onChanged: (value) => _setUplinkFilter(value ?? false),
               title: const Text('Hide Hyper-V switch uplinks'),
             ),
+            if (_hiddenAliases.isNotEmpty)
+              CheckboxListTile(
+                key: const ValueKey('show-hidden-adapters'),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                value: _showHidden,
+                onChanged: (value) => _setShowHidden(value ?? false),
+                title: Text('Show hidden adapters ($_hiddenCount)'),
+              ),
             const Divider(),
             Expanded(
               child: _loadingAdapters
@@ -993,44 +1087,72 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
                       ),
                     )
                   : adapters.isEmpty
-                  ? const Center(child: Text('No network adapters found.'))
+                  ? Center(
+                      child: Text(
+                        _hiddenCount > 0
+                            ? 'All network adapters are hidden.'
+                            : 'No network adapters found.',
+                      ),
+                    )
                   : ListView.separated(
                       itemCount: adapters.length,
                       separatorBuilder: (_, _) => const SizedBox(height: 6),
                       itemBuilder: (context, index) {
                         final adapter = adapters[index];
                         final selected = adapter.alias == _selectedAlias;
-                        return Semantics(
-                          selected: selected,
-                          button: true,
-                          excludeSemantics: true,
-                          onTap: () => _selectAdapter(adapter.alias),
-                          label:
-                              '${adapter.alias}, ${adapter.status}, ${adapter.adapterType}',
-                          child: ListTile(
-                            selected: selected,
-                            selectedTileColor: scheme.primaryContainer,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(10),
+                        final hidden = _isHidden(adapter.alias);
+                        return Row(
+                          children: [
+                            Expanded(
+                              child: Semantics(
+                                selected: selected,
+                                button: true,
+                                excludeSemantics: true,
+                                onTap: () => _selectAdapter(adapter.alias),
+                                label:
+                                    '${adapter.alias}, ${adapter.status}, ${adapter.adapterType}'
+                                    '${hidden ? ', hidden' : ''}',
+                                child: ListTile(
+                                  selected: selected,
+                                  selectedTileColor: scheme.primaryContainer,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  leading: Icon(
+                                    hidden
+                                        ? Icons.visibility_off_outlined
+                                        : adapter.status == 'Up'
+                                        ? Icons.lan_rounded
+                                        : Icons.portable_wifi_off_rounded,
+                                    color: adapter.status == 'Up' && !hidden
+                                        ? (scheme.brightness == Brightness.dark
+                                              ? const Color(0xFF5EE0B3)
+                                              : const Color(0xFF087F5B))
+                                        : scheme.onSurfaceVariant,
+                                  ),
+                                  title: Text(
+                                    adapter.alias,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: hidden
+                                        ? TextStyle(
+                                            color: scheme.onSurfaceVariant,
+                                            fontStyle: FontStyle.italic,
+                                          )
+                                        : null,
+                                  ),
+                                  subtitle: Text(
+                                    hidden
+                                        ? '${adapter.status} · Hidden'
+                                        : adapter.status,
+                                    maxLines: 1,
+                                  ),
+                                  onTap: () => _selectAdapter(adapter.alias),
+                                ),
+                              ),
                             ),
-                            leading: Icon(
-                              adapter.status == 'Up'
-                                  ? Icons.lan_rounded
-                                  : Icons.portable_wifi_off_rounded,
-                              color: adapter.status == 'Up'
-                                  ? (scheme.brightness == Brightness.dark
-                                        ? const Color(0xFF5EE0B3)
-                                        : const Color(0xFF087F5B))
-                                  : scheme.onSurfaceVariant,
-                            ),
-                            title: Text(
-                              adapter.alias,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            subtitle: Text(adapter.status, maxLines: 1),
-                            onTap: () => _selectAdapter(adapter.alias),
-                          ),
+                            _buildHideButton(adapter.alias, hidden),
+                          ],
                         );
                       },
                     ),
@@ -1046,6 +1168,16 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
       ),
     );
   }
+
+  Widget _buildHideButton(String alias, bool hidden) => IconButton(
+    tooltip: hidden ? 'Unhide $alias' : 'Hide $alias',
+    onPressed: _hiddenAdapterStore == null
+        ? null
+        : () => _setAdapterHidden(alias, !hidden),
+    icon: Icon(
+      hidden ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+    ),
+  );
 
   void _setUplinkFilter(bool value) {
     if (_hideUplinks == value) return;
@@ -1075,13 +1207,23 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
                 for (final adapter in adapters)
                   DropdownMenuItem(
                     value: adapter.alias,
-                    child: Text('${adapter.alias} — ${adapter.status}'),
+                    child: Text(
+                      '${adapter.alias} — ${adapter.status}'
+                      '${_isHidden(adapter.alias) ? ' (hidden)' : ''}',
+                    ),
                   ),
               ],
               onChanged: _busy
                   ? null
                   : (value) => value == null ? null : _selectAdapter(value),
             ),
+            if (_hiddenAliases.isNotEmpty)
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _showHidden,
+                onChanged: (value) => _setShowHidden(value ?? false),
+                title: Text('Show hidden adapters ($_hiddenCount)'),
+              ),
             Row(
               children: [
                 Expanded(
@@ -1092,6 +1234,8 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
                     title: const Text('Hide Hyper-V uplinks'),
                   ),
                 ),
+                if (_selectedAlias != null)
+                  _buildHideButton(_selectedAlias!, _isHidden(_selectedAlias!)),
                 IconButton(
                   tooltip: 'Refresh adapters (F5)',
                   onPressed: _loadingAdapters || _busy
@@ -1147,6 +1291,12 @@ class _NetworkHomeScreenState extends State<NetworkHomeScreen> {
               ),
             )
           else if (_details != null) ...[
+            if (_isHidden(_details!.alias)) ...[
+              const InlineNotice(
+                message: 'This adapter is hidden. It only appears in the adapter list while "Show hidden adapters" is checked.',
+              ),
+              const SizedBox(height: 14),
+            ],
             _buildStatusCards(context),
             const SizedBox(height: 14),
             _buildAddressDetails(context),

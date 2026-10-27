@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:av_network_toolbag/backend_service.dart';
+import 'package:av_network_toolbag/hidden_adapters.dart';
 import 'package:av_network_toolbag/main.dart';
 import 'package:av_network_toolbag/models.dart';
 import 'package:av_network_toolbag/ipv4_presets.dart';
@@ -160,6 +161,52 @@ void main() {
           .onPressed,
       isNotNull,
     );
+  });
+
+  testWidgets('hidden adapters are marked, revealable and persist', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1400, 1800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final store = _MemoryHiddenAdapterStore();
+    final backend = _FakeBackend();
+    await tester.pumpWidget(
+      AvNetworkToolbagApp(backend: backend, hiddenAdapterStore: store),
+    );
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Show hidden adapters'), findsNothing);
+    await tester.tap(find.byTooltip('Hide Ethernet'));
+    await tester.pumpAndSettle();
+    expect(store.aliases, {'ethernet'});
+    expect(find.text('All network adapters are hidden.'), findsOneWidget);
+    expect(find.text('Show hidden adapters (1)'), findsOneWidget);
+    expect(find.text('Address details'), findsNothing);
+
+    await tester.tap(find.text('Show hidden adapters (1)'));
+    await tester.pumpAndSettle();
+    expect(find.text('Up · Hidden'), findsOneWidget);
+    expect(find.textContaining('This adapter is hidden'), findsOneWidget);
+    expect(find.text('Address details'), findsOneWidget);
+
+    // A fresh launch reads the saved list and keeps the adapter hidden.
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(
+      AvNetworkToolbagApp(backend: backend, hiddenAdapterStore: store),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Show hidden adapters (1)'), findsOneWidget);
+    expect(find.text('All network adapters are hidden.'), findsOneWidget);
+
+    await tester.tap(find.text('Show hidden adapters (1)'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Unhide Ethernet'));
+    await tester.pumpAndSettle();
+    expect(store.aliases, isEmpty);
+    expect(find.textContaining('Show hidden adapters'), findsNothing);
+    expect(find.byTooltip('Hide Ethernet'), findsOneWidget);
   });
 
   testWidgets('window exit waits for backend cleanup', (tester) async {
@@ -387,4 +434,13 @@ class _MemoryPresetStore extends Ipv4PresetStore {
 
   @override
   Future<void> save(List<Ipv4Preset> values) async => presets = List.of(values);
+}
+
+class _MemoryHiddenAdapterStore extends HiddenAdapterStore {
+  Set<String> aliases = {};
+  @override
+  Future<Set<String>> load() async => {...aliases};
+
+  @override
+  Future<void> save(Set<String> values) async => aliases = {...values};
 }

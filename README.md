@@ -50,6 +50,12 @@ The foundation of this tool came from my PowerShell tool [NIC_Changer](https://g
 
 ## Changelog
 
+### v1.3.1
+
+27 October 2026
+
+- Users can persistently hide interfaces that they don't use. Thanks again for the idea Isaac!
+
 ### v1.2.1
 
 21 October 2026
